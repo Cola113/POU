@@ -888,6 +888,13 @@ function getLocationDepth(location?: string) {
   return match ? Number(match[1].replace(/,/g, '')) : 4200;
 }
 
+function getStatusLocation(location?: string) {
+  return (location || '子午线站')
+    .replace(/\s*·\s*深度\s*[\d,]+\s*(?:m|米)/gi, '')
+    .replace(/\s*深度\s*[\d,]+\s*(?:m|米)/gi, '')
+    .trim() || '子午线站';
+}
+
 function scoreChoiceLocally(input: string, choice: StoryChoice) {
   const source = `${choice.text} ${(choice.intent || []).join(' ')}`;
   let score = 0;
@@ -1713,7 +1720,9 @@ function ManualModal({ isOpen, pageIndex, onChangePage, onClose }: {
           <div className="manual-page" ref={pageRef}>
             <div className="manual-paper">
               {page.chapter && <div className="manual-chapter">{page.chapter}</div>}
-              {isDirectoryPage ? (
+              {isDirectoryPage && isFirstDirectoryPage ? (
+                <div className="manual-directory-empty" />
+              ) : isDirectoryPage ? (
                 <ManualDirectoryPage
                   entries={page.directoryEntries || []}
                   pageNumber={page.directoryPageNumber || 1}
@@ -1883,6 +1892,7 @@ export default function App() {
   const currentTaskToastKey = currentTaskEvent && currentNode
     ? `${currentNode.id}-${currentTaskEvent.kind}-${currentTaskEvent.title}`
     : '';
+  const statusLocation = getStatusLocation(currentNode?.location);
   const revealedBriefingUpdates = getRevealedBriefingUpdates(state.messages);
   const latestBriefingUpdate = revealedBriefingUpdates[revealedBriefingUpdates.length - 1];
   const characterProfiles = getRevealedCharacterProfiles(state.messages, state.history);
@@ -1916,7 +1926,7 @@ export default function App() {
       <DevNodeJump currentNodeId={state.currentNodeId} onJump={jumpToNode} />
       <StatusBar
         timeInfo={timeInfo}
-        location={currentNode?.location || '子午线站'}
+        location={statusLocation}
         depth={currentDepth}
         loopCount={state.loopCount}
         onOpenManual={() => openManual()}
