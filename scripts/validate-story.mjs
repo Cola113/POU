@@ -41,20 +41,34 @@ for (const nodeId of nodes.keys()) {
 }
 
 const endingNames = []
-for (const [, body] of nodes) {
+const endingNodeIds = []
+for (const [nodeId, body] of nodes) {
   const endingName = body.match(/\bendingName: '([^']+)'/)
-  if (endingName) endingNames.push(endingName[1])
+  if (endingName) {
+    endingNames.push(endingName[1])
+    endingNodeIds.push(nodeId)
+    if (!/\bisEnding: true\b/.test(body)) {
+      errors.push(`${nodeId} has endingName but is not marked isEnding.`)
+    }
+    if ((edges.get(nodeId) || []).length > 0) {
+      errors.push(`${nodeId} is an ending node but still has outgoing edges.`)
+    }
+  }
 }
 
 const uniqueEndingNames = new Set(endingNames)
-const hasFixedBadEnding = uniqueEndingNames.has('回溯') || uniqueEndingNames.has('\\u56de\\u6eaf')
-if (uniqueEndingNames.size !== 1 || !hasFixedBadEnding) {
-  errors.push('First playthrough should have exactly one fixed bad ending: 回溯.')
+const expectedEndings = ['反应堆过载', '强制上浮', '第四下敲击']
+if (
+  uniqueEndingNames.size !== expectedEndings.length ||
+  expectedEndings.some(name => !uniqueEndingNames.has(name))
+) {
+  errors.push(`Story should have exactly these endings: ${expectedEndings.join(', ')}.`)
 }
 
-const loopRestart = nodes.get('loop_restart') || ''
-if (!/\bisEnding: true\b/.test(loopRestart)) {
-  errors.push('loop_restart must be the actual ending node.')
+for (const [nodeId, targets] of edges) {
+  if (targets.length === 0 && !endingNodeIds.includes(nodeId)) {
+    errors.push(`${nodeId} has no outgoing edges and is not an ending node.`)
+  }
 }
 
 if (errors.length > 0) {

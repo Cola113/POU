@@ -4,11 +4,33 @@ import type { Beat, DisplayMessage, GameState, GameTimeInfo, StoryNode } from '.
 
 const BREATH_CYCLE_MINUTES = 47;
 const STORY_START_HOUR = 22;
-const TOTAL_ENDINGS = new Set(
+const SAVE_KEY = 'abyss-save-v1';
+const ENDING_NAMES = new Set(
   Object.values(storyNodes)
     .map(node => node.endingName)
     .filter((name): name is string => Boolean(name))
-).size;
+);
+const TOTAL_ENDINGS = ENDING_NAMES.size;
+const VALID_PHASES = new Set<GameState['phase']>(['title', 'playing', 'transitioning', 'ending']);
+const VALID_BEAT_TYPES = new Set<Beat['type']>(['scene', 'narration', 'dialogue', 'inner', 'system']);
+
+type PersistedGameState = Omit<GameState, 'currentNode' | 'isStreaming'>;
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return Boolean(value && typeof value === 'object' && !Array.isArray(value));
+}
+
+function readString(value: unknown, fallback = ''): string {
+  return typeof value === 'string' ? value : fallback;
+}
+
+function readNumber(value: unknown, fallback = 0): number {
+  return typeof value === 'number' && Number.isFinite(value) ? value : fallback;
+}
+
+function readStringArray(value: unknown): string[] {
+  return Array.isArray(value) ? value.filter((item): item is string => typeof item === 'string') : [];
+}
 
 function calcGameTime(gameHours: number): GameTimeInfo {
   const totalMinutes = (STORY_START_HOUR * 60) + (gameHours * 60);
@@ -30,16 +52,84 @@ function calcGameTime(gameHours: number): GameTimeInfo {
 }
 
 function loadEndings(): string[] {
-  try { return JSON.parse(localStorage.getItem('abyss-endings') || '[]'); } catch { return []; }
+  try {
+    const saved = JSON.parse(localStorage.getItem('abyss-endings') || '[]');
+    return Array.isArray(saved) ? saved.filter(name => ENDING_NAMES.has(name)) : [];
+  } catch {
+    return [];
+  }
 }
-function saveEndings(endings: string[]) { localStorage.setItem('abyss-endings', JSON.stringify(endings)); }
+function saveEndings(endings: string[]) {
+  try {
+    localStorage.setItem('abyss-endings', JSON.stringify(endings));
+  } catch {
+    // Persistence is helpful but should never interrupt the story.
+  }
+}
 function loadLoopCount(): number {
-  const count = Number.parseInt(localStorage.getItem('abyss-loops') || '0', 10);
-  return Number.isFinite(count) ? count : 0;
+  try {
+    const count = Number.parseInt(localStorage.getItem('abyss-loops') || '0', 10);
+    return Number.isFinite(count) ? count : 0;
+  } catch {
+    return 0;
+  }
 }
-function saveLoopCount(count: number) { localStorage.setItem('abyss-loops', String(count)); }
+function saveLoopCount(count: number) {
+  try {
+    localStorage.setItem('abyss-loops', String(count));
+  } catch {
+    // Persistence is helpful but should never interrupt the story.
+  }
+}
 
-function createInitialState(): GameState {
+function restoreMessages(value: unknown): DisplayMessage[] {
+  if (!Array.isArray(value)) return [];
+
+  return value.reduce<DisplayMessage[]>((messages, item, index) => {
+    if (!isRecord(item)) return messages;
+
+    const nodeId = readString(item.nodeId);
+    const type = readString(item.type);
+    const text = readString(item.fullText, readString(item.text));
+    if (!nodeId || !VALID_BEAT_TYPES.has(type as Beat['type']) || !text) return messages;
+
+    const fullText = readString(item.fullText);
+    messages.push({
+      id: readString(item.id, `saved-msg-${index}`),
+      nodeId,
+      type: type as Beat['type'],
+      speaker: typeof item.speaker === 'string' ? item.speaker : undefined,
+      text,
+      fullText: fullText || undefined,
+      isStreaming: false,
+    });
+    return messages;
+  }, []);
+}
+
+function restoreChoices(value: unknown): GameState['choicesMade'] {
+  if (!Array.isArray(value)) return [];
+
+  return value.reduce<GameState['choicesMade']>((choices, item) => {
+    if (!isRecord(item)) return choices;
+
+    const nodeId = readString(item.nodeId);
+    const choiceText = readString(item.choiceText);
+    const choiceIndex = readNumber(item.choiceIndex, -1);
+    if (!nodeId || !choiceText || choiceIndex < 0) return choices;
+
+    choices.push({
+      nodeId,
+      choiceIndex,
+      choiceText,
+      resolvedChoiceText: typeof item.resolvedChoiceText === 'string' ? item.resolvedChoiceText : undefined,
+      resolutionText: typeof item.resolutionText === 'string' ? item.resolutionText : undefined,
+    });
+    return choices;
+  }, []);
+}
+
+function createFreshState(): GameState {
   return {
     phase: 'title',
     currentNodeId: 'opening',
@@ -53,6 +143,75 @@ function createInitialState(): GameState {
     loopCount: loadLoopCount(),
     endingsUnlocked: loadEndings(),
   };
+}
+
+function loadSavedState(): GameState | null {
+  try {
+    const parsed: unknown = JSON.parse(localStorage.getItem(SAVE_KEY) || 'null');
+    if (!isRecord(parsed)) return null;
+
+    const currentNodeId = readString(parsed.currentNodeId, 'opening');
+    const currentNode = storyNodes[currentNodeId];
+    const requestedPhase = readString(parsed.phase, 'title') as GameState['phase'];
+    if (!VALID_PHASES.has(requestedPhase)) return null;
+    if (requestedPhase !== 'title' && !currentNode) return null;
+
+    const fresh = createFreshState();
+    const safeHistory = readStringArray(parsed.history).filter(nodeId => Boolean(storyNodes[nodeId]));
+    const history = requestedPhase !== 'title' && currentNode && !safeHistory.includes(currentNodeId)
+      ? [...safeHistory, currentNodeId]
+      : safeHistory;
+    const beatLimit = currentNode ? currentNode.beats.length : 0;
+    const currentBeatIndex = Math.max(0, Math.min(Math.floor(readNumber(parsed.currentBeatIndex)), beatLimit));
+    const restoredPhase = requestedPhase === 'ending' && !currentNode?.isEnding ? 'playing' : requestedPhase;
+
+    return {
+      ...fresh,
+      phase: restoredPhase,
+      currentNodeId,
+      currentNode: restoredPhase === 'title' ? null : currentNode,
+      messages: restoreMessages(parsed.messages),
+      currentBeatIndex,
+      isStreaming: false,
+      history,
+      choicesMade: restoreChoices(parsed.choicesMade),
+      gameTime: readNumber(parsed.gameTime, currentNode?.gameTime ?? fresh.gameTime),
+      loopCount: readNumber(parsed.loopCount, fresh.loopCount),
+      endingsUnlocked: readStringArray(parsed.endingsUnlocked).filter(name => ENDING_NAMES.has(name)),
+    };
+  } catch {
+    return null;
+  }
+}
+
+function createInitialState(): GameState {
+  return loadSavedState() ?? createFreshState();
+}
+
+function createPersistedState(state: GameState): PersistedGameState {
+  return {
+    phase: state.phase,
+    currentNodeId: state.currentNodeId,
+    messages: state.messages.map(message => ({
+      ...message,
+      text: message.fullText || message.text,
+      isStreaming: false,
+    })),
+    currentBeatIndex: state.currentBeatIndex,
+    history: state.history,
+    choicesMade: state.choicesMade,
+    gameTime: state.gameTime,
+    loopCount: state.loopCount,
+    endingsUnlocked: state.endingsUnlocked,
+  };
+}
+
+function saveGameState(state: GameState) {
+  try {
+    localStorage.setItem(SAVE_KEY, JSON.stringify(createPersistedState(state)));
+  } catch {
+    // Local storage can be disabled or full; losing persistence should not stop play.
+  }
 }
 
 function createStreamingMessage(beat: Beat, nodeId: string): DisplayMessage {
@@ -136,9 +295,29 @@ function enterNode(state: GameState, nodeId: string): GameState {
 export function useGame() {
   const [state, setState] = useState<GameState>(createInitialState);
   const stateRef = useRef(state);
+  const lastSaveKeyRef = useRef('');
 
   useEffect(() => {
     stateRef.current = state;
+
+    const latestMessage = state.messages[state.messages.length - 1];
+    const saveKey = [
+      state.phase,
+      state.currentNodeId,
+      state.currentBeatIndex,
+      state.messages.length,
+      latestMessage?.id || '',
+      state.history.length,
+      state.choicesMade.length,
+      state.gameTime,
+      state.loopCount,
+      state.endingsUnlocked.join('|'),
+    ].join('::');
+
+    if (saveKey !== lastSaveKeyRef.current) {
+      lastSaveKeyRef.current = saveKey;
+      saveGameState(state);
+    }
   }, [state]);
 
   useEffect(() => {
@@ -194,7 +373,19 @@ export function useGame() {
   }, [state.isStreaming]);
 
   const startGame = useCallback(() => {
-    setState(enterNode(createInitialState(), 'opening'));
+    setState(enterNode(createFreshState(), 'opening'));
+  }, []);
+
+  const jumpToNode = useCallback((nodeId: string) => {
+    setState(prev => {
+      if (!storyNodes[nodeId]) return prev;
+
+      return enterNode({
+        ...createFreshState(),
+        loopCount: prev.loopCount,
+        endingsUnlocked: prev.endingsUnlocked,
+      }, nodeId);
+    });
   }, []);
 
   const advance = useCallback(() => {
@@ -259,12 +450,12 @@ export function useGame() {
   const restart = useCallback(() => {
     const newLoop = loadLoopCount() + 1;
     saveLoopCount(newLoop);
-    const newState = createInitialState();
+    const newState = createFreshState();
     newState.loopCount = newLoop;
     setState(newState);
   }, []);
 
   const timeInfo = calcGameTime(state.gameTime);
 
-  return { state, timeInfo, startGame, advance, makeChoice, restart, totalEndings: TOTAL_ENDINGS };
+  return { state, timeInfo, startGame, jumpToNode, advance, makeChoice, restart, totalEndings: TOTAL_ENDINGS };
 }
