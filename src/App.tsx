@@ -1171,7 +1171,15 @@ function EndingScreen({ endingName, personalitySummary, onRestart, endingsUnlock
   totalEndings: number;
 }) {
   const [merClickCount, setMerClickCount] = useState(0);
+  const [isMerReturnReady, setIsMerReturnReady] = useState(false);
   const showMerBubble = merClickCount >= 3;
+
+  useEffect(() => {
+    if (!showMerBubble) return;
+
+    const timer = window.setTimeout(() => setIsMerReturnReady(true), 2000);
+    return () => window.clearTimeout(timer);
+  }, [showMerBubble]);
 
   return (
     <div className="ending-screen">
@@ -1199,9 +1207,11 @@ function EndingScreen({ endingName, personalitySummary, onRestart, endingsUnlock
             <br />
             但是晚安呀！
           </p>
-          <button className="btn-restart mer-return-btn" onClick={onRestart}>
-            回到深潜器
-          </button>
+          {isMerReturnReady && (
+            <button className="btn-restart mer-return-btn" onClick={onRestart}>
+              回到深潜器
+            </button>
+          )}
         </div>
       )}
     </div>
